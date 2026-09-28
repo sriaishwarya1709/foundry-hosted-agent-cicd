@@ -14,6 +14,30 @@ Authentication uses Microsoft Entra ID everywhere. The repository uses no API ke
 - Agent identity and Foundry project identity: managed identities.
 - ACA app: a user-assigned managed identity.
 
+> **Sample code.** This repository is a reference implementation for learning and proofs of
+> concept. Review the [security notes](#security-notes) and [known limitations](#known-limitations)
+> before you adapt it for production.
+
+## Quickstart: choose your path
+
+| I want to... | Follow |
+|---|---|
+| Understand the design | [Use case](#use-case-contoso-support-desk) → [Prompt vs. hosted agents](#prompt-agents-vs-hosted-agents) → [End-to-end flow](#end-to-end-flow) |
+| Try it in one resource group from my machine | [Prerequisites](#prerequisites) → [Deploy one stage locally](#deploy-one-stage-locally) → [Sample queries](#sample-queries) |
+| Run the full dev → test → prod pipeline from my own GitHub repo | [Prerequisites](#prerequisites) → [GitHub Actions setup](#github-actions-setup) |
+| Change the agents for my own scenario | [Customize](#customize) |
+| Remove everything | [Clean up](#clean-up) |
+
+To run the pipeline in your own GitHub repository, do these steps once:
+
+1. **Fork** this repository, or create a new repository from it, and clone your copy. If GitHub disables workflows in the fork, open the **Actions** tab and enable them.
+2. Sign in: `az login` and `gh auth login`.
+3. Run `./scripts/bootstrap-github.ps1 -SubscriptionId <subscription-id>`. This creates the GitHub → Azure trust and the three GitHub Environments.
+4. Optional: add required reviewers to the `test` and `prod` environments.
+5. Open **Actions → Provision and promote hosted agent → Run workflow**. Each stage job shows the web app URL when it finishes.
+
+A push to `main` made before step 3 fails at *Deploy dev*, because GitHub can't sign in to Azure yet. Re-run the workflow after the bootstrap.
+
 ## Use case: Contoso support desk
 
 ```mermaid
@@ -181,9 +205,28 @@ tests/                Offline tests for workflow routing, web API, and deploymen
 
 ## Prerequisites
 
-- An Azure subscription where you can create resources and role assignments.
-- Azure CLI, a recent Azure Developer CLI (`azd`), PowerShell 7, Python 3.11 or later, and, for the CI setup, GitHub CLI.
-- In `swedencentral` (the default) or your chosen region, hosted-agent support and Global Standard quota for `gpt-4.1-mini` (30K TPM per stage by default).
+**Tools:** Azure CLI, a recent Azure Developer CLI (`azd`), PowerShell 7 (`pwsh`, also used by the azd hook), Python 3.11 or later, and, for the CI setup, GitHub CLI. You don't need Docker: images are built in Azure with ACR Tasks and ACA remote build.
+
+**Permissions:**
+
+- **Local deployment:** Owner on the subscription, or Contributor plus Role Based Access Control Administrator. The templates create a resource group and role assignments.
+- **Bootstrap:** the same Azure permissions, plus admin access to the GitHub repository, to create environments and variables.
+
+**Region and quota:**
+
+- In `swedencentral` (the default) or your chosen region, the subscription needs Foundry hosted-agent support and Global Standard quota for `gpt-4.1-mini`: 30K TPM for each stage, so 90K TPM for all three stages.
+- To use a different region, set `AZURE_LOCATION` locally, or pass `-Location` to the bootstrap script.
+- To use a smaller quota, set `AZURE_AI_MODEL_CAPACITY` (in thousands of TPM).
+
+**Cost:** each stage creates billable resources:
+
+- Foundry model usage, billed per token.
+- Hosted agent compute (1 vCPU / 2 GiB per active session).
+- An ACR Premium registry.
+- A Container Apps environment. The app scales to zero in `dev` and `test` and keeps 1 replica in `prod`.
+- Log Analytics and Application Insights ingestion.
+
+To keep costs low for a demo, deploy only `dev`, and [clean up](#clean-up) when you're done.
 
 ## Deploy one stage locally
 
@@ -258,19 +301,19 @@ $body = @{ message = 'Our API calls started failing with HTTP 503 an hour ago.';
 
 ```powershell
 python -m venv .venv; .\.venv\Scripts\pip install -r requirements-dev.txt
-azd env get-values > .env        # FOUNDRY_PROJECT_ENDPOINT, AZURE_AI_MODEL_DEPLOYMENT_NAME, ...
+.\.venv\Scripts\python -m pytest -q                                   # offline tests, no Azure needed
+azd env get-values | Out-File -Encoding utf8 .env                      # FOUNDRY_PROJECT_ENDPOINT, AZURE_AI_MODEL_DEPLOYMENT_NAME, ...
 ```
 
 In VS Code, use the launch configurations:
 
-- **Run hosted agent locally** serves the workflow at `http://localhost:8088/responses`.
+- **Run hosted agent locally** serves the workflow at `http://localhost:8088/responses`. It calls the deployed model with your own `az login` identity.
 - **Run web front-end locally** starts the UI on `:8000`. The UI calls the *deployed* hosted agent.
 
-### Force a new agent version or clean up
+### Force a new agent version
 
 ```powershell
 .\.venv\Scripts\python.exe scripts\deploy_agent.py deploy --force   # new version even if source unchanged
-azd down --purge                                                    # removes the current stage's resource group
 ```
 
 ## GitHub Actions setup
@@ -328,3 +371,54 @@ Recommended hardening:
 - The ACA ingress is public. Before you expose `prod` to real users, enable
   [Container Apps authentication](https://learn.microsoft.com/azure/container-apps/authentication) (Entra ID) or put the app behind a gateway, so unauthenticated callers can't run up model usage.
 - Customer text is untrusted input. The triage prompt treats it as data, and the reviewer removes any request for secrets.
+- The prompts contain made-up Contoso policies (refund window, portal paths). Replace them with your real policies. The model can still produce inaccurate answers, so keep a human in the loop for any action that affects a customer's money or account.
+
+## Customize
+
+| Change | Where | Notes |
+|---|---|---|
+| Agent behavior or policies | [src/agent/prompts](src/agent/prompts) | Edit the Markdown instructions. The next deploy creates a new agent version automatically. |
+| Add or remove a specialist | [src/agent/workflow.py](src/agent/workflow.py) | Add the category to `SPECIALISTS`, add `prompts/<category>.md`, and list the category in `prompts/triage.md`. Update the tests in [tests/test_workflow.py](tests/test_workflow.py). |
+| Model | `azd env set AZURE_AI_MODEL_DEPLOYMENT_NAME <model>` / `AZURE_AI_MODEL_CAPACITY` | For CI, add the same names as GitHub Environment variables and pass them in [deploy-stage.yml](.github/workflows/deploy-stage.yml). The model must be available as Global Standard in the region. |
+| Agent name | `name` in [src/agent/agent.yaml](src/agent/agent.yaml) **and** `agentName` in [infra/main.bicep](infra/main.bicep) | A test fails if the two don't match. |
+| Agent CPU / memory | `resources` in [src/agent/agent.yaml](src/agent/agent.yaml) | |
+| Region | `AZURE_LOCATION` (locally) or `-Location` (bootstrap) | |
+| Stage names or resource-group prefix | `-GitHubEnvironments` / `-EnvironmentPrefix` on the bootstrap, and the jobs in [deploy.yml](.github/workflows/deploy.yml) | `stage` in Bicep only accepts `dev`, `test`, or `prod`. |
+| Web UI | [src/web/static/index.html](src/web/static/index.html), [src/web/app.py](src/web/app.py) | |
+
+After any change, run `python -m pytest -q` and `az bicep build --file infra/main.bicep`. The pipeline runs both in its *validate* job.
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `InsufficientQuota` or model deployment fails | There isn't enough Global Standard quota for the model in the region. Lower `AZURE_AI_MODEL_CAPACITY`, request more quota, or change the region. |
+| `InvalidResourceGroupLocation` during the bootstrap | Resource groups can't change region. The script reuses the region of an existing `rg-github-identities`, so pull the latest script, or pass `-IdentityResourceGroupName` to use a new group. |
+| CI fails at `azure/login` with `AADSTS70021` / no matching federated identity | The GitHub Environment name or repository doesn't match the federated credential. Re-run the bootstrap from your own clone. It reads the repository's OIDC subject format automatically. |
+| Invoke returns `403` right after the first deployment | New role assignments can take a few minutes to take effect. The smoke test already retries. Re-run the job if it still fails. |
+| Invoke returns `424` / `session_not_ready` | The hosted agent container is still starting. Wait 30–60 seconds and retry. |
+| The agent version never becomes `active` | Check the version's logs in the Foundry portal (**Agents → contoso-support-desk → Logs**) or with `az acr task logs --registry <acr>` for build problems. |
+| The web app shows the hello-world page | This happens only between the first provision and the first `azd deploy`. Run `azd deploy`. |
+| The web app returns `502 The support agent is unavailable` | Check the container app logs: `az containerapp logs show -n <app> -g <rg>`. It's usually RBAC propagation or the agent is still starting. |
+
+## Clean up
+
+Remove each stage (each one is a separate resource group), then the CI identity:
+
+```powershell
+foreach ($stage in 'dev','test','prod') {
+  azd env select "hosted-agents-$stage" 2>$null
+  if ($LASTEXITCODE -eq 0) { azd down --purge --force } else { az group delete -n "rg-hosted-agents-$stage" --yes }
+}
+az group delete -n rg-github-identities --yes   # only if no other repository uses this identity group
+```
+
+`--purge` also permanently deletes the soft-deleted Foundry resource, so the names can be reused.
+
+## Known limitations
+
+- Foundry hosted agents and parts of the `azure-ai-projects` hosted-agent API are in **preview**. APIs, protocol versions, and regional availability can change.
+- The web app has no user authentication. See the [security notes](#security-notes).
+- Occasionally a very short reply (for example a refusal) comes back with its first words repeated. Longer replies haven't been affected.
+- Every deploy with changed agent code creates a new agent version. Old versions stay in the project and get 0% of traffic. Delete them in the portal if you want to tidy up.
+- The bootstrap grants the CI identity subscription-wide roles, for simplicity. Scope them to the stage resource groups for production.
