@@ -41,6 +41,94 @@ The workflow is built with `WorkflowBuilder` in [src/agent/workflow.py](src/agen
 exposed as one agent with `.as_agent()` and served on the Foundry `responses` protocol by
 `ResponsesHostServer`. The prompts are in [src/agent/prompts](src/agent/prompts).
 
+## Prompt agents vs. hosted agents
+
+Foundry Agent Service runs two kinds of agents:
+
+| | Prompt agent | Hosted agent (this repo) |
+|---|---|---|
+| **What you deploy** | A declarative definition: model, instructions, and built-in tools (web search, file search, and so on). | A container image with your own agent code, built with any framework (MAF, LangGraph, custom). |
+| **Where it runs** | Inside the Foundry service. You don't write any server code. | Foundry runs your container on managed compute (image from your ACR, listening on port 8088). |
+| **Logic** | One model call loop: instructions + tools. | Anything you can code: multi-agent workflows, routing, custom tools, deterministic steps. |
+| **Created with** | `PromptAgentDefinition` (see the reference repo [foundry-agent-cicd](https://github.com/sriaishwarya1709/foundry-agent-cicd)). | `HostedAgentDefinition` with a `ContainerConfiguration` image and protocol versions. |
+| **Invoked with** | The project's Responses API with an `agent_reference`. | The agent's own endpoint, `.../agents/<name>/endpoint/protocols/openai/responses`, with an `agent_session_id`. |
+| **Identity** | Runs as the project. | Each agent gets its own Entra ID *instance identity*, which needs roles such as Foundry User. |
+| **Best for** | Single-purpose assistants with no custom code. | Orchestration, custom logic, or bringing an existing agent framework into Foundry. |
+
+### Why the portal shows one agent
+
+This is a **multi-agent** solution **packaged as a single hosted agent**. Foundry registers one
+hosted agent, `contoso-support-desk`, because it deploys one container. The five MAF agents
+(`triage`, `billing`, `technical`, `general`, `reviewer`) are `agent_framework.Agent` objects
+wired together by `WorkflowBuilder` inside that container. They aren't separate Foundry resources.
+Their activity shows up as spans in the traces (Application Insights / Foundry tracing), not as
+separate entries in the agent list. This keeps the whole workflow versioned, promoted, and rolled
+back as one unit.
+
+If you need each agent to be managed separately in the portal, you have two options:
+
+- Create each specialist as its own prompt agent and call them from the workflow.
+- Deploy each one as its own hosted agent and connect them over A2A.
+
+Both options add more versions to keep in sync across stages.
+
+## End-to-end flow
+
+### Request flow (runtime)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User
+    participant Web as ACA web app (FastAPI)
+    participant EP as Foundry agent endpoint
+    participant HA as Hosted agent container (MAF)
+    participant LLM as gpt-4.1-mini deployment
+    participant AI as Application Insights
+
+    User->>Web: POST /api/chat {message, session_id, previous_response_id}
+    Web->>Web: Validate input, get Entra token (user-assigned managed identity)
+    Web->>EP: responses.create(input, agent_session_id)
+    EP->>HA: Route to the active version's container session
+    HA->>LLM: triage agent classifies request
+    HA->>HA: Switch-case edge picks billing / technical / general
+    HA->>LLM: specialist agent drafts reply
+    HA->>LLM: reviewer agent finalizes reply
+    HA-->>EP: Final reply (Responses protocol)
+    EP-->>Web: response.output_text, response.id
+    Web-->>User: {reply, response_id}
+    HA--)AI: Traces for each agent step
+    Web--)AI: Request telemetry
+```
+
+1. The browser sends the message together with a `session_id` it generated. For follow-up turns it also sends the previous `response_id`.
+2. The web app authenticates with its **user-assigned managed identity**, which has Foundry User on the account. It then calls the hosted agent's Responses endpoint through `AIProjectClient.get_openai_client(agent_name=...)`.
+3. Foundry routes the request to the agent version that currently receives 100% of traffic. The `agent_session_id` keeps a conversation on the same container session.
+4. Inside the container, the MAF workflow runs **triage → one specialist → reviewer**. Each agent calls the model through `FoundryChatClient`, using the **agent's instance identity**.
+5. Only the reviewer's output is returned. Setting `previous_response_id` gives the next turn the conversation history.
+6. Application Insights receives telemetry from both the web app and the hosted agent. Local authentication is disabled on App Insights, so both send it with Entra ID credentials.
+
+### Delivery flow (CI/CD)
+
+```mermaid
+flowchart LR
+    Dev[git push main] --> V[validate<br/>pytest + bicep build]
+    V --> D[Deploy dev]
+    D --> T[Deploy test]
+    T --> P[Deploy prod]
+    subgraph Stage[Each stage job: GitHub Environment + OIDC]
+        direction TB
+        S1[azd provision<br/>Bicep -> rg-hosted-agents-&lt;stage&gt;] --> S2[predeploy hook<br/>ACR build -> new hosted agent version<br/>-> RBAC -> wait active -> route 100%]
+        S2 --> S3[azd deploy web<br/>ACA remote build + new revision]
+        S3 --> S4[Smoke tests<br/>agent invoke + /healthz]
+    end
+    D -.-> Stage
+```
+
+The same commit moves through every stage. Each stage builds its own image in its own registry and
+creates a new agent version in its own project. A stage runs only after the previous one succeeds
+(and its approval, if you configured required reviewers).
+
 ## Per-stage architecture
 
 ```mermaid
