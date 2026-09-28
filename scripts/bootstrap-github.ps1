@@ -59,12 +59,18 @@ if (-not $account.id) {
 }
 $SubscriptionId = $account.id
 
+# A resource group's region is immutable, so reuse it when the identity group already exists.
+$identityLocation = $Location
+if ((az group exists --subscription $SubscriptionId --name $IdentityResourceGroupName) -eq 'true') {
+    $identityLocation = az group show --subscription $SubscriptionId --name $IdentityResourceGroupName --query location --output tsv
+}
+
 $parameterFile = Join-Path ([System.IO.Path]::GetTempPath()) "hosted-agent-bootstrap-$([guid]::NewGuid()).json"
 $parameters = @{
     '$schema'      = 'https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#'
     contentVersion = '1.0.0.0'
     parameters     = @{
-        location                  = @{ value = $Location }
+        location                  = @{ value = $identityLocation }
         identityResourceGroupName = @{ value = $IdentityResourceGroupName }
         identityName              = @{ value = $IdentityName }
         githubSubjectPrefix       = @{ value = $GitHubSubjectPrefix }
@@ -95,7 +101,7 @@ $shared = [ordered]@{
     AZURE_PRINCIPAL_ID    = $outputs.AZURE_PRINCIPAL_ID.value
     AZURE_TENANT_ID       = $outputs.AZURE_TENANT_ID.value
     AZURE_SUBSCRIPTION_ID = $outputs.AZURE_SUBSCRIPTION_ID.value
-    AZURE_LOCATION        = $outputs.AZURE_LOCATION.value
+    AZURE_LOCATION        = $Location
 }
 
 $summary = foreach ($githubEnvironment in $GitHubEnvironments) {

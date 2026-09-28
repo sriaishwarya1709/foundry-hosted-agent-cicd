@@ -1,6 +1,6 @@
 targetScope = 'subscription'
 
-@description('Azure region for the managed identity resource group.')
+@description('Azure region for the managed identity resource group (not the stage region).')
 param location string = 'swedencentral'
 
 @description('Resource group that contains the GitHub deployment identity.')
@@ -77,4 +77,3 @@ output AZURE_CLIENT_ID string = githubIdentity.outputs.clientId
 output AZURE_PRINCIPAL_ID string = githubIdentity.outputs.principalId
 output AZURE_TENANT_ID string = tenant().tenantId
 output AZURE_SUBSCRIPTION_ID string = subscription().subscriptionId
-output AZURE_LOCATION string = location
