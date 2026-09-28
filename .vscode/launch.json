@@ -1,0 +1,33 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Run hosted agent locally (:8088)",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/agent/main.py",
+      "cwd": "${workspaceFolder}/src/agent",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "Run web front-end locally (:8000)",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "uvicorn",
+      "args": ["app:app", "--port", "8000"],
+      "cwd": "${workspaceFolder}/src/web",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env"
+    },
+    {
+      "name": "Invoke deployed hosted agent",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/scripts/deploy_agent.py",
+      "args": ["invoke"],
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env"
+    }
+  ]
+}

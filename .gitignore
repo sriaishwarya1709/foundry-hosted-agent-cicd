@@ -1,0 +1,9 @@
+.azure/
+.azd.env
+.env
+.venv/
+__pycache__/
+.pytest_cache/
+*.pyc
+infra/**/*.json
+!infra/main.parameters.json

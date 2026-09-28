@@ -1,0 +1,69 @@
+name: Deploy stage
+
+on:
+  workflow_call:
+    inputs:
+      stage:
+        description: GitHub Environment and deployment stage (dev, test, prod)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    name: ${{ inputs.stage }}
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ inputs.stage }}
+      url: ${{ steps.outputs.outputs.web_uri }}
+    env:
+      AZURE_ENV_NAME: ${{ vars.AZURE_ENV_NAME }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: Azure/setup-azd@v2
+      - name: Authenticate azd with GitHub OIDC
+        run: >-
+          azd auth login
+          --client-id "${{ vars.AZURE_CLIENT_ID }}"
+          --federated-credential-provider github
+          --tenant-id "${{ vars.AZURE_TENANT_ID }}"
+      - name: Configure azd environment
+        run: |
+          azd env new "$AZURE_ENV_NAME" --no-prompt || azd env select "$AZURE_ENV_NAME"
+          azd env set AZURE_SUBSCRIPTION_ID "${{ vars.AZURE_SUBSCRIPTION_ID }}"
+          azd env set AZURE_LOCATION "${{ vars.AZURE_LOCATION }}"
+          azd env set AZURE_PRINCIPAL_ID "${{ vars.AZURE_PRINCIPAL_ID }}"
+          azd env set AZURE_PRINCIPAL_TYPE ServicePrincipal
+          azd env set AZURE_STAGE "${{ inputs.stage }}"
+      - name: Provision infrastructure, publish hosted agent, deploy web
+        run: azd up --no-prompt
+      - name: Read outputs
+        id: outputs
+        run: |
+          azd env get-values > .azd.env
+          set -a; . ./.azd.env; set +a
+          echo "web_uri=$SERVICE_WEB_URI" >> "$GITHUB_OUTPUT"
+      - name: Smoke test hosted agent
+        run: |
+          set -a; . ./.azd.env; set +a
+          .venv/bin/python scripts/deploy_agent.py invoke
+      - name: Smoke test web front-end
+        run: |
+          set -a; . ./.azd.env; set +a
+          for attempt in 1 2 3 4 5 6; do
+            if curl --fail --silent --show-error "$SERVICE_WEB_URI/healthz"; then exit 0; fi
+            echo "Web app not ready (attempt $attempt); retrying in 20s..."
+            sleep 20
+          done
+          exit 1

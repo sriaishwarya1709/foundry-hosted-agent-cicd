@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+name: foundry-hosted-agent-cicd
+
+infra:
+  provider: bicep
+  path: ./infra
+
+services:
+  web:
+    project: ./src/web
+    language: python
+    host: containerapp
+    docker:
+      path: ./Dockerfile
+      remoteBuild: true
+
+hooks:
+  # Publishes the hosted agent before azd deploys the web front-end that calls it.
+  predeploy:
+    shell: pwsh
+    run: ./scripts/predeploy.ps1

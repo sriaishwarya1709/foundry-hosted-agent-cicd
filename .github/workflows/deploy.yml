@@ -1,0 +1,54 @@
+name: Provision and promote hosted agent
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: |
+            requirements*.txt
+            src/*/requirements.txt
+      - run: pip install -r requirements-dev.txt
+      - run: python -m pytest -q
+      - name: Build Bicep
+        run: |
+          az bicep build --file infra/main.bicep --stdout > /dev/null
+          az bicep build --file infra/bootstrap/bootstrap.bicep --stdout > /dev/null
+
+  deploy-dev:
+    name: Deploy dev
+    needs: validate
+    uses: ./.github/workflows/deploy-stage.yml
+    with:
+      stage: dev
+
+  deploy-test:
+    name: Deploy test
+    needs: deploy-dev
+    uses: ./.github/workflows/deploy-stage.yml
+    with:
+      stage: test
+
+  deploy-prod:
+    name: Deploy prod
+    needs: deploy-test
+    uses: ./.github/workflows/deploy-stage.yml
+    with:
+      stage: prod

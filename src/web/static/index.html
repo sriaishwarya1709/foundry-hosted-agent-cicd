@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Contoso support desk</title>
+  <style>
+    :root { font-family: system-ui, sans-serif; color-scheme: light dark; }
+    body { max-width: 760px; margin: 0 auto; padding: 1.5rem; }
+    header { display: flex; justify-content: space-between; align-items: baseline; }
+    #stage { font-size: .85rem; opacity: .7; }
+    #log { border: 1px solid #8884; border-radius: 8px; padding: 1rem; min-height: 320px; overflow-y: auto; max-height: 60vh; }
+    .msg { margin: .5rem 0; padding: .6rem .8rem; border-radius: 8px; white-space: pre-wrap; }
+    .user { background: #2b6cb022; margin-left: 20%; }
+    .agent { background: #8882; margin-right: 20%; }
+    .error { background: #c5303022; }
+    form { display: flex; gap: .5rem; margin-top: 1rem; }
+    textarea { flex: 1; min-height: 3rem; font: inherit; padding: .5rem; }
+    button { padding: 0 1.2rem; font: inherit; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Contoso support desk</h1>
+    <span id="stage"></span>
+  </header>
+  <p>Ask a billing, technical, or general question. A triage agent routes it to a specialist and a reviewer finalizes the reply.</p>
+  <div id="log" aria-live="polite"></div>
+  <form id="chat">
+    <textarea id="message" maxlength="4000" placeholder="e.g. I was charged twice for my subscription this month" required></textarea>
+    <button type="submit" id="send">Send</button>
+  </form>
+  <script>
+    const log = document.getElementById("log");
+    const form = document.getElementById("chat");
+    const input = document.getElementById("message");
+    const send = document.getElementById("send");
+    const sessionId = sessionStorage.getItem("sessionId") || crypto.randomUUID().replaceAll("-", "");
+    sessionStorage.setItem("sessionId", sessionId);
+    let previousResponseId = null;
+
+    function add(text, cls) {
+      const div = document.createElement("div");
+      div.className = `msg ${cls}`;
+      div.textContent = text;
+      log.appendChild(div);
+      log.scrollTop = log.scrollHeight;
+    }
+
+    fetch("/api/info").then(r => r.json()).then(i => {
+      document.getElementById("stage").textContent = `${i.agent} · ${i.stage}`;
+    }).catch(() => {});
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const message = input.value.trim();
+      if (!message) return;
+      add(message, "user");
+      input.value = "";
+      send.disabled = true;
+      try {
+        const response = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message, session_id: sessionId, previous_response_id: previousResponseId }),
+        });
+        const body = await response.json();
+        if (!response.ok) throw new Error(body.detail || response.statusText);
+        previousResponseId = body.response_id;
+        add(body.reply, "agent");
+      } catch (error) {
+        add(`Error: ${error.message}`, "agent error");
+      } finally {
+        send.disabled = false;
+        input.focus();
+      }
+    });
+  </script>
+</body>
+</html>
